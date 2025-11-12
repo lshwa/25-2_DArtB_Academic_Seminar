@@ -1,3 +1,4 @@
+import os
 import re
 import csv
 import time
@@ -6,22 +7,25 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 BASE = "https://linkareer.com"
 LIST_URL = "https://linkareer.com/cover-letter/search?page={page}&sort=PASSED_AT&tab=all"
-OUT_CSV = "linkareer_coverletters_p103_110.csv"
+
+# === 저장 경로: 프로젝트 루트(/.../25-2_DArtB_Academic_Seminar)/data ===
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # python code 상위
+DATA_DIR = os.path.join(BASE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+OUT_CSV = os.path.join(DATA_DIR, "linkareer_coverletters_p111_140.csv")
+
+print("[INFO] __file__:", __file__)                     # ⬇ 추가 (실행 파일 확인)
+print("[INFO] DATA_DIR:", DATA_DIR)                     # ⬇ 추가 (폴더 확인)
+print("[INFO] OUT_CSV:", OUT_CSV)                       # ⬇ 추가 (정확한 저장 경로)
 
 def normalize_text(raw: str) -> str:
     tokens = re.findall(r'"(.*?)"', raw, flags=re.S)
-    if tokens:
-        text = "".join(tokens)
-    else:
-        text = raw
-
+    text = "".join(tokens) if tokens else raw
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return text
 
 def extract_links_from_list(page) -> list:
-
-    # 목록 페이지의 모든 a[href] 중 /cover-letter/숫자 패턴만 추출
     anchors = page.eval_on_selector_all(
         "a[href]", "els => els.map(e => e.getAttribute('href'))"
     )
@@ -35,37 +39,42 @@ def extract_links_from_list(page) -> list:
             cid = m.group(1)
             if cid not in ids:
                 ids.add(cid)
-                # 정규화된 상세 링크(페이지 파라미터는 유지해도 되고 생략해도 됨)
                 links.append(urljoin(BASE, f"/cover-letter/{cid}"))
     return links
 
 def extract_coverletter_text(page) -> str:
     selectors = [
-        "article#coverLetterContent",            # 스크린샷 기준 최유력
-        "main.CoverLetterDetailContent__StyledMain-sc-177ad02f-0",  # 클래스 기반
-        "main",                                  # 폴백
+        "article#coverLetterContent",
+        "main.CoverLetterDetailContent__StyledMain-sc-177ad02f-0",
+        "main",
     ]
     raw = ""
     for sel in selectors:
         try:
             raw = page.eval_on_selector(sel, "el => el.innerText")
-            if raw and len(raw.strip()) > 0:
+            if raw and raw.strip():
                 break
-        except PWTimeout:
+        except (PWTimeout, Exception):
             continue
-        except Exception:
-            continue
-
     if not raw:
-        # 최후 폴백: body 전체 텍스트
         try:
             raw = page.evaluate("() => document.body.innerText || ''")
         except Exception:
             raw = ""
-
     return normalize_text(raw)
 
+def ensure_header(csv_path: str, fieldnames):
+    need_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
+    if need_header:
+        print("[INFO] Writing CSV header...")            # ⬇ 추가
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+
 def crawl():
+    fieldnames = ["page", "id", "url", "length", "text"]
+    ensure_header(OUT_CSV, fieldnames)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -74,9 +83,7 @@ def crawl():
         )
         page = context.new_page()
 
-        rows = []
-        # 여기의 page 넘버를 바꿔야 함. 여기서는 103부터 111로 되어있음. 
-        for page_no in range(103, 111):
+        for page_no in range(111, 141):
             list_url = LIST_URL.format(page=page_no)
             print(f"[LIST] visiting {list_url}")
             page.goto(list_url, wait_until="networkidle", timeout=60000)
@@ -89,29 +96,33 @@ def crawl():
                     page.goto(detail_url, wait_until="networkidle", timeout=60000)
                     text = extract_coverletter_text(page)
                     cid = re.search(r"/cover-letter/(\d+)", detail_url).group(1)
-                    rows.append({
+                    row = {
                         "page": page_no,
                         "id": cid,
                         "url": detail_url,
                         "length": len(text),
                         "text": text
-                    })
-                    print(f"    [{idx}/{len(links)}] id={cid} len={len(text)}")
-                    time.sleep(1.2)  # 과도한 요청 방지
+                    }
+
+                    # ↙↙ 즉시 저장 + 에러 출력
+                    try:
+                        with open(OUT_CSV, "a", newline="", encoding="utf-8-sig") as f:
+                            writer = csv.DictWriter(f, fieldnames=fieldnames)
+                            writer.writerow(row)
+                            f.flush()
+                    except Exception as fe:
+                        print(f"[ERROR] CSV write failed for id={cid}: {fe}")  # ⬇ 추가
+                        raise
+
+                    print(f"    [{idx}/{len(links)}] id={cid} len={len(text)} (saved)")
+                    time.sleep(1.0)
                 except Exception as e:
                     print(f"    [skip] {detail_url} -> {e}")
-                    time.sleep(1.2)
+                    time.sleep(1.0)
 
-            # 페이지 사이 간격
             time.sleep(2.0)
 
-        # CSV 저장 (UTF-8 BOM: 엑셀 호환 좋음)
-        with open(OUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=["page", "id", "url", "length", "text"])
-            writer.writeheader()
-            writer.writerows(rows)
-
-        print(f"\nSaved {len(rows)} cover letters → {OUT_CSV}")
+        print(f"\n✅ Finished. CSV at: {OUT_CSV}")
         browser.close()
 
 if __name__ == "__main__":
