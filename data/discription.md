@@ -1,0 +1,1 @@
+여기 data 폴더에다가 csv 저장해서 넣고 benchmark.py 에 그 csv 파일 이름 넣어서 실행하면 됩니다.
